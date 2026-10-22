@@ -2,7 +2,9 @@ import json
 
 import pytest
 
-from pmc_toolkit.xml_parse_api import ensure_extracted_article
+from pathlib import Path
+
+from pmc_toolkit.xml_parse_api import ensure_extracted_article, parse_article_xml
 
 
 def test_ensure_extracted_article_reads_xml_and_writes_extracted_cache(
@@ -125,3 +127,17 @@ def test_ensure_extracted_article_reads_existing_extracted_cache(tmp_path) -> No
 def test_ensure_extracted_article_tells_user_to_fetch_first(tmp_path) -> None:
     with pytest.raises(ValueError, match=r"pmc-toolkit fetch PMC11370360\.1 --ext xml"):
         ensure_extracted_article("PMC11370360.1", cache_dir=tmp_path)
+
+
+def test_parse_article_xml_reads_without_writing(tmp_path: Path) -> None:
+    xml_path = tmp_path / "PMC1.1.xml"
+    xml_path.write_text(
+        "<article><front><article-meta><title-group><article-title>Title"
+        "</article-title></title-group></article-meta></front></article>",
+        encoding="utf-8",
+    )
+
+    data = parse_article_xml(xml_path)
+
+    assert data["article_info"]["title"] == "Title"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["PMC1.1.xml"]

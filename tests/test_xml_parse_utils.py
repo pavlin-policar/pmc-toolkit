@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pmc_toolkit.xml_parse_api import _authors_with_affiliations
 from pmc_toolkit.xml_parse_utils import (
     extract_article_data,
     extract_headings,
@@ -423,4 +424,56 @@ def test_extract_references_splits_refs_citing_several_works(tmp_path: Path) -> 
     ] == [
         ("R7", "7", "First"),
         ("R7", "7", "Second"),
+    ]
+
+
+def _authors(tmp_path: Path, article_meta: str) -> list[dict]:
+    path = tmp_path / "article.xml"
+    path.write_text(
+        f"<article><front><article-meta>{article_meta}</article-meta></front></article>",
+        encoding="utf-8",
+    )
+    data = extract_article_data(load_xml(path))
+    return _authors_with_affiliations(data["article"]["authors"], data["affiliations"])
+
+
+def test_authors_link_affiliations_nested_in_contrib_group(tmp_path: Path) -> None:
+    authors = _authors(
+        tmp_path,
+        """
+        <contrib-group>
+          <contrib contrib-type="author">
+            <name><surname>Sarkar</surname><given-names>F</given-names></name>
+            <xref ref-type="aff" rid="Aff1 Aff2"/>
+          </contrib>
+          <aff id="Aff1"><label>1</label><institution-wrap>
+            <institution-id institution-id-type="ROR">https://ror.org/055m2tx54</institution-id>
+            <institution>North-Eastern Hill University</institution></institution-wrap>, Shillong, India</aff>
+          <aff id="Aff2">Second Institute</aff>
+        </contrib-group>
+        """,
+    )
+
+    assert authors[0]["affiliations"] == [
+        "North-Eastern Hill University , Shillong, India",
+        "Second Institute",
+    ]
+
+
+def test_authors_share_unreferenced_and_nested_affiliations(tmp_path: Path) -> None:
+    authors = _authors(
+        tmp_path,
+        """
+        <contrib-group>
+          <contrib contrib-type="author"><name><surname>A</surname></name></contrib>
+          <contrib contrib-type="author"><name><surname>B</surname></name>
+            <aff>Own Institute</aff></contrib>
+        </contrib-group>
+        <aff>Shared Hospital</aff>
+        """,
+    )
+
+    assert [author["affiliations"] for author in authors] == [
+        ["Shared Hospital"],
+        ["Own Institute"],
     ]

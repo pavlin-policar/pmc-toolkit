@@ -27,6 +27,8 @@ PUB_ID_TYPE_ALIASES = {"medline": "pmid", "pmc": "pmcid"}
 REFERENCE_AUTHOR_TAGS = ("name", "string-name", "collab")
 REFERENCE_TITLE_TAGS = ("article-title", "chapter-title", "part-title", "source")
 ET_AL_PATTERN = re.compile(r"\bet\.?\s*al\b", re.IGNORECASE)
+# Identifier elements (ROR, GRID, ISNI) whose text is not part of the affiliation.
+AFFILIATION_EXCLUDED_TAGS = ("institution-id",)
 
 
 def load_xml(path: Path) -> Any:
@@ -162,20 +164,48 @@ def extract_abstract(root: Any) -> dict[str, Any]:
 
 
 def extract_affiliations(root: Any) -> list[dict[str, Any]]:
+    """Article-level affiliations, wherever they sit in ``article-meta``.
+
+    Affiliations nested in a single ``<contrib>`` belong to that contributor
+    and are attached to it by ``_extract_authors`` instead.
+    """
     affiliations = []
-    for affiliation in root.xpath(".//article-meta/aff"):
-        label = _direct_child_text(affiliation, "label")
-        text = _without_label(_text(affiliation), label)
-        affiliations.append(
-            _compact_dict(
-                {
-                    "source_id": affiliation.get("id"),
-                    "label": label,
-                    "text": text,
-                }
+    for article_meta in root.xpath(".//article-meta"):
+        for affiliation in _shared_affiliations(article_meta):
+            label = _direct_child_text(affiliation, "label")
+            affiliations.append(
+                _compact_dict(
+                    {
+                        "source_id": _affiliation_id(affiliation),
+                        "label": label,
+                        "text": _affiliation_text(affiliation),
+                    }
+                )
             )
-        )
     return affiliations
+
+
+def _shared_affiliations(article_meta: Any) -> list[Any]:
+    """``<aff>`` elements outside any ``<contrib>``; first of each alternative set."""
+    return article_meta.xpath(
+        ".//aff[not(ancestor::contrib)]"
+        "[not(parent::aff-alternatives) or not(preceding-sibling::aff)]"
+    )
+
+
+def _affiliation_id(affiliation: Any) -> str | None:
+    parent = affiliation.getparent()
+    if affiliation.get("id") is None and parent.tag == "aff-alternatives":
+        return parent.get("id")
+    return affiliation.get("id")
+
+
+def _affiliation_text(affiliation: Any) -> str | None:
+    """Affiliation text without its label and institution identifiers."""
+    return _without_label(
+        _text_excluding(affiliation, AFFILIATION_EXCLUDED_TAGS),
+        _direct_child_text(affiliation, "label"),
+    )
 
 
 def extract_author_notes(root: Any) -> dict[str, Any]:
@@ -474,20 +504,8 @@ def _has_et_al(citation: Any) -> bool:
         " or @person-group-type='author']/etal"
     ):
         return True
-    parts = []
-
-    def collect(element: Any) -> None:
-        if element.tag in REFERENCE_TITLE_TAGS:
-            return
-        if element.text:
-            parts.append(element.text)
-        for child in element:
-            collect(child)
-            if child.tail:
-                parts.append(child.tail)
-
-    collect(citation)
-    return bool(ET_AL_PATTERN.search(" ".join(parts)))
+    text = _text_excluding(citation, REFERENCE_TITLE_TAGS) or ""
+    return bool(ET_AL_PATTERN.search(text))
 
 
 def _reference_links(citation: Any) -> list[str]:
@@ -566,6 +584,24 @@ def _text(element: Any | None) -> str | None:
     return value or None
 
 
+def _text_excluding(element: Any, excluded_tags: tuple[str, ...]) -> str | None:
+    """Like ``_text``, skipping the content (not the tails) of excluded tags."""
+    parts = []
+
+    def collect(node: Any) -> None:
+        if node.text:
+            parts.append(node.text)
+        for child in node:
+            if child.tag not in excluded_tags:
+                collect(child)
+            if child.tail:
+                parts.append(child.tail)
+
+    collect(element)
+    value = " ".join(part.strip() for part in parts if part.strip())
+    return value or None
+
+
 def _first_text(root: Any, *paths: str) -> str | None:
     for path in paths:
         matches = root.xpath(path)
@@ -613,10 +649,38 @@ def _extract_typed_texts(root: Any, path: str, type_attribute: str) -> dict[str,
 
 
 def _extract_authors(article_meta: Any) -> list[dict[str, Any]]:
+    """Authors with the ids of their linked affiliations.
+
+    ``affiliations`` holds affiliation texts not reachable by id: those nested
+    in the author's own ``<contrib>``, or, for an author with no linked or
+    nested affiliation, the article's affiliations that no ``xref`` points to
+    (JATS convention for affiliations shared by all authors).
+    """
+    referenced_ids = {
+        rid
+        for xref in article_meta.xpath(".//xref[@ref-type='aff']")
+        for rid in (xref.get("rid") or "").split()
+    }
+    unreferenced_affiliations = [
+        text
+        for affiliation in _shared_affiliations(article_meta)
+        if _affiliation_id(affiliation) not in referenced_ids
+        and (text := _affiliation_text(affiliation))
+    ]
     authors = []
     for contrib in article_meta.xpath(
         ".//contrib-group/contrib[@contrib-type='author']"
     ):
+        affiliation_ids = [
+            rid
+            for xref in contrib.xpath(".//xref[@ref-type='aff']")
+            for rid in (xref.get("rid") or "").split()
+        ]
+        nested_affiliations = [
+            text
+            for affiliation in contrib.xpath("./aff | ./aff-alternatives/aff[1]")
+            if (text := _affiliation_text(affiliation))
+        ]
         collaboration = _first_text(contrib, ".//collab")
         surname = _first_text(contrib, ".//name/surname")
         given_names = _first_text(contrib, ".//name/given-names")
@@ -630,11 +694,9 @@ def _extract_authors(article_meta: Any) -> list[dict[str, Any]]:
             "surname": surname,
             "collaboration": collaboration,
             "orcid": _first_text(contrib, ".//contrib-id[@contrib-id-type='orcid']"),
-            "affiliation_ids": [
-                rid
-                for xref in contrib.xpath(".//xref[@ref-type='aff']")
-                if (rid := xref.get("rid"))
-            ],
+            "affiliation_ids": affiliation_ids,
+            "affiliations": nested_affiliations
+            or ([] if affiliation_ids else unreferenced_affiliations),
         }
         authors.append(_compact_dict(author, keep_empty={"affiliation_ids"}))
     return authors

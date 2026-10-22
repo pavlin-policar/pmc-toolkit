@@ -52,6 +52,17 @@ def ensure_extracted_article(
     )
 
 
+def parse_article_xml(xml_path: Path) -> dict[str, Any]:
+    """Parse a JATS XML file into the extracted-article schema.
+
+    Reads only ``xml_path`` and writes nothing, so it suits read-only article
+    caches and re-parsing with a newer parser than the cached parse.
+    """
+    from pmc_toolkit.xml_parse_utils import extract_article_data, load_xml
+
+    return _group_extracted_article(extract_article_data(load_xml(xml_path)))
+
+
 def ensure_extracted_article_cache(
     requested_pmcid: str,
     cache_dir: Path | None = None,
@@ -102,10 +113,7 @@ def _ensure_extracted_article_cache(
             f"first. Expected file: {paths.xml_path}"
         )
 
-    from pmc_toolkit.xml_parse_utils import extract_article_data, load_xml
-
-    root = load_xml(paths.xml_path)
-    parsed = _group_extracted_article(extract_article_data(root))
+    parsed = parse_article_xml(paths.xml_path)
     storage_cache.write_cached_extracted_article(
         paths.cache_root,
         paths.versioned_pmcid,
@@ -209,7 +217,8 @@ def _authors_with_affiliations(
                     affiliation_text_by_id[affiliation_id]
                     for affiliation_id in author.get("affiliation_ids", [])
                     if affiliation_id in affiliation_text_by_id
-                ],
+                ]
+                + author.get("affiliations", []),
             },
             keep_empty={"affiliations"},
         )
