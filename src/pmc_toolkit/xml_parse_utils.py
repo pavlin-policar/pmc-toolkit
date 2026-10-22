@@ -13,6 +13,20 @@ XMLParser = etree.XMLParser(
     remove_blank_text=True,
 )
 REFERENCE_SEPARATOR_PATTERN = re.compile(r"^[\s,;]+$")
+# Citation elements, in the order structured reference fields are read from.
+CITATION_TAGS = ("element-citation", "nlm-citation", "mixed-citation", "citation")
+# The order in which citation elements supply a reference's as-printed text.
+CITATION_TEXT_PRIORITY = (
+    "mixed-citation",
+    "citation",
+    "nlm-citation",
+    "element-citation",
+)
+# pub-id-type values that alias the canonical doi/pmid/pmcid identifier keys.
+PUB_ID_TYPE_ALIASES = {"medline": "pmid", "pmc": "pmcid"}
+REFERENCE_AUTHOR_TAGS = ("name", "string-name", "collab")
+REFERENCE_TITLE_TAGS = ("article-title", "chapter-title", "part-title", "source")
+ET_AL_PATTERN = re.compile(r"\bet\.?\s*al\b", re.IGNORECASE)
 
 
 def load_xml(path: Path) -> Any:
@@ -326,37 +340,163 @@ def extract_supplementary_media(root: Any) -> list[dict[str, Any]]:
 
 
 def extract_references(root: Any) -> list[dict[str, Any]]:
+    """Extract one record per cited work in the article's reference lists.
+
+    A ``<ref>`` normally holds one citation element. ``<citation-alternatives>``
+    holds the same work in several forms (typically a tagged
+    ``element-citation`` and an as-printed ``mixed-citation``); they are merged
+    into one record. A ``<ref>`` holding several citation elements outside
+    ``<citation-alternatives>`` cites several works and yields one record per
+    work, all sharing the ref's ``source_id`` and ``label``.
+    """
     references = []
     for ref in root.xpath(".//ref-list//ref"):
-        citation = _first_element(ref, "mixed-citation", "element-citation", "citation")
-        data: dict[str, Any] = {
+        base = {
             "source_id": ref.get("id"),
             "label": _direct_child_text(ref, "label"),
-            "text": _text(citation) if citation is not None else _text(ref),
         }
-        if citation is not None:
-            publication_type = citation.get("publication-type")
-            if publication_type:
-                data["publication_type"] = publication_type
-
-            ids = _extract_typed_texts(citation, ".//pub-id", "pub-id-type")
-            if ids:
-                data["identifiers"] = ids
-
-            fields = _compact_dict(
-                {
-                    "article_title": _first_text(citation, ".//article-title"),
-                    "source": _first_text(citation, ".//source"),
-                    "year": _first_text(citation, ".//year"),
-                    "volume": _first_text(citation, ".//volume"),
-                    "issue": _first_text(citation, ".//issue"),
-                    "pages": _page_range(citation),
-                }
-            )
-            data.update(fields)
-
-        references.append(_compact_dict(data))
+        works = _reference_works(ref)
+        if not works:
+            references.append(_compact_dict({**base, "text": _text(ref)}))
+            continue
+        for forms in works:
+            references.append(_compact_dict({**base, **_reference_data(forms)}))
     return references
+
+
+def _reference_works(ref: Any) -> list[list[Any]]:
+    """Group a ref's citation elements into works, each a list of its forms."""
+    works = []
+    for child in ref:
+        if child.tag == "citation-alternatives":
+            forms = [form for form in child if form.tag in CITATION_TAGS]
+            if forms:
+                works.append(forms)
+        elif child.tag in CITATION_TAGS:
+            works.append([child])
+    return works
+
+
+def _reference_data(forms: list[Any]) -> dict[str, Any]:
+    structured = sorted(forms, key=lambda form: CITATION_TAGS.index(form.tag))
+    printed = min(forms, key=lambda form: CITATION_TEXT_PRIORITY.index(form.tag))
+
+    def first(extract: Any) -> Any:
+        for form in structured:
+            value = extract(form)
+            if value:
+                return value
+        return None
+
+    def first_text(path: str) -> str | None:
+        return first(lambda form: _first_text(form, path))
+
+    authors = max(
+        (_reference_authors(form) for form in structured), key=len, default=[]
+    )
+    return {
+        "text": _text(printed),
+        "publication_type": first(lambda form: form.get("publication-type")),
+        "identifiers": _reference_identifiers(structured),
+        "authors": authors,
+        "authors_truncated": (
+            True if authors and any(_has_et_al(form) for form in forms) else None
+        ),
+        "article_title": first_text(".//article-title"),
+        "chapter_title": first_text(".//chapter-title"),
+        "source": first_text(".//source"),
+        "year": first_text(".//year"),
+        "volume": first_text(".//volume"),
+        "issue": first_text(".//issue"),
+        "pages": first(_page_range),
+        "publisher": first_text(".//publisher-name"),
+        "conference": first_text(".//conf-name"),
+        "links": first(_reference_links),
+    }
+
+
+def _reference_identifiers(forms: list[Any]) -> dict[str, str]:
+    """Union of pub-ids over all forms; the first value per type wins."""
+    identifiers: dict[str, str] = {}
+    for form in forms:
+        for pub_id in form.xpath(".//pub-id"):
+            id_type = pub_id.get("pub-id-type")
+            value = _text(pub_id)
+            if id_type and value:
+                identifiers.setdefault(PUB_ID_TYPE_ALIASES.get(id_type, id_type), value)
+    return identifiers
+
+
+def _reference_authors(citation: Any) -> list[dict[str, str]]:
+    """Cited authors in order; editors and other contributor roles are skipped.
+
+    Names are taken from ``person-group`` elements typed as authors (or
+    untyped), and from names placed directly in the citation, as in mixed
+    citations without a ``person-group``.
+    """
+    containers = {citation} | {
+        group
+        for group in citation.findall("person-group")
+        if group.get("person-group-type") in (None, "author")
+    }
+    authors = []
+    for element in citation.iter(*REFERENCE_AUTHOR_TAGS):
+        if element.getparent() not in containers:
+            continue
+        if element.tag == "collab":
+            name = _text(element)
+            if name:
+                authors.append({"full_name": name, "collaboration": name})
+            continue
+        surname = _first_text(element, "./surname")
+        given_names = _first_text(element, "./given-names")
+        full_name = (
+            " ".join(part for part in [given_names, surname] if part)
+            if surname or given_names
+            else _text(element)
+        )
+        author = _compact_dict(
+            {"given_names": given_names, "surname": surname, "full_name": full_name}
+        )
+        if author:
+            authors.append(author)
+    return authors
+
+
+def _has_et_al(citation: Any) -> bool:
+    """Whether the author list is cut short: ``<etal/>`` or a printed "et al".
+
+    Title and source text is excluded from the search, so a title that
+    mentions "et al." does not mark the list as truncated.
+    """
+    if citation.xpath(
+        "./etal | ./person-group[not(@person-group-type)"
+        " or @person-group-type='author']/etal"
+    ):
+        return True
+    parts = []
+
+    def collect(element: Any) -> None:
+        if element.tag in REFERENCE_TITLE_TAGS:
+            return
+        if element.text:
+            parts.append(element.text)
+        for child in element:
+            collect(child)
+            if child.tail:
+                parts.append(child.tail)
+
+    collect(citation)
+    return bool(ET_AL_PATTERN.search(" ".join(parts)))
+
+
+def _reference_links(citation: Any) -> list[str]:
+    links = []
+    for element in citation.xpath(".//ext-link | .//uri"):
+        link = _href(element) or _text(element)
+        if link and link not in links:
+            links.append(link)
+    return links
 
 
 def extract_figures(root: Any) -> list[dict[str, Any]]:

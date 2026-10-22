@@ -59,7 +59,14 @@ SCHEMA: dict[str, set[str]] = {
         "volume",
         "issue",
         "pages",
+        "authors",
+        "authors_truncated",
+        "chapter_title",
+        "publisher",
+        "conference",
+        "links",
     },
+    "reference_author": {"given_names", "surname", "full_name", "collaboration"},
     "identifiers": {"doi", "pmid", "pmcid"},
     "figure": {"source_id", "label", "caption", "graphics"},
     "table": {"source_id", "label", "caption", "rows", "footnotes"},
@@ -189,6 +196,11 @@ ARTICLE_XML = """
       <ref id="R1">
         <label>1</label>
         <mixed-citation publication-type="journal">
+          <person-group person-group-type="author">
+            <name><surname>Roe</surname><given-names>Richard</given-names></name>
+            <collab>Example Consortium</collab>
+            <etal/>
+          </person-group>
           <article-title>Referenced Article</article-title>
           <source>Reference Journal</source>
           <year>2020</year>
@@ -200,6 +212,15 @@ ARTICLE_XML = """
           <pub-id pub-id-type="pmid">23193287</pub-id>
           <pub-id pub-id-type="pmcid">PMC3531190</pub-id>
         </mixed-citation>
+      </ref>
+      <ref id="R2">
+        <element-citation publication-type="book">
+          <chapter-title>Referenced Chapter</chapter-title>
+          <source>Proceedings of the Example Conference</source>
+          <conf-name>Example Conference</conf-name>
+          <publisher-name>Example Press</publisher-name>
+          <ext-link ext-link-type="uri" href="https://example.org/chapter">link</ext-link>
+        </element-citation>
       </ref>
     </ref-list>
   </back>
@@ -256,8 +277,16 @@ def test_parse_output_matches_documented_skill_schema(tmp_path) -> None:
 
     for reference in data["references"]:
         _check(reference, "reference", seen)
+        for author in reference.get("authors", []):
+            _check(author, "reference_author", seen)
         if "identifiers" in reference:
-            _check(reference["identifiers"], "identifiers", seen)
+            # Reference identifiers are keyed by pub-id-type: doi/pmid/pmcid are
+            # documented, further types (pii, arxiv, ...) pass through as strings.
+            identifiers = reference["identifiers"]
+            assert all(isinstance(value, str) for value in identifiers.values())
+            seen.setdefault("identifiers", set()).update(
+                set(identifiers) & SCHEMA["identifiers"]
+            )
     for figure in data["figures"]:
         _check(figure, "figure", seen)
     for table in data["tables"]:

@@ -65,7 +65,8 @@ Author        = { given_names?, surname?, full_name?, orcid?, affiliations: [str
 Section       = { source_id?, section_id?, title?, paragraphs: [Para], sections: [Section] }   # recursive
 SectionLike   = { source_id?, title?, paragraphs: [Para], sections: [Section] }   # ack & data_availability: like Section but no section_id
 Para          = { source_id?, text?, reference_ids: [str], figure_ids: [str], table_ids: [str] }
-Reference     = { source_id?, label?, text?, publication_type?, identifiers?: {doi?, pmid?, pmcid?}, article_title?, source?, year?, volume?, issue?, pages? }
+Reference     = { source_id?, label?, text?, publication_type?, identifiers?: {doi?, pmid?, pmcid?, <pub-id-type>?}, authors?: [RefAuthor], authors_truncated?: true, article_title?, chapter_title?, source?, year?, volume?, issue?, pages?, publisher?, conference?, links?: [str] }   # one per cited work: a <ref> citing several works yields several References sharing source_id/label; identifiers also carry other pub-id types (pii, arxiv, ...) as-is; authors_truncated = list cut short by et al.; links = ext-link/uri targets
+RefAuthor     = { given_names?, surname?, full_name?, collaboration? }   # cited authors in order, editors excluded; collaboration = group author (then full_name is the group name)
 Figure        = { source_id?, label?, caption?, graphics: [str] }      # graphics = image filenames
 Table         = { source_id?, label?, caption?, rows: [[str]], footnotes: [str] }   # rows = array of cell-arrays
 Link          = { href?, text?, type? }
@@ -97,7 +98,7 @@ Choose the smallest route that answers the request. Prefer a single command whos
 | Body structure, then a section | `content-outline.jq`, then `query-id.jq` on the chosen section `source_id` |
 | Figures | `parse` → `.figures[]` `{source_id, label, caption, graphics}` |
 | Tables | `parse` → `.tables[]` `{source_id, label, caption, rows, footnotes}` |
-| References | `parse` → `.references[]` `{source_id, label, article_title, source, year, volume, pages, identifiers, text}` |
+| References | `parse` → `.references[]` `{source_id, label, authors, article_title, source, year, volume, pages, identifiers, text}` |
 | Counts | `parse` → `.figures \| length`, `.tables \| length`, `.references \| length` |
 | Which section cites figure/table/ref X | `reverse-lookup-xref.jq` (figures/tables have no section backref; it returns citing paragraphs tagged with their section) |
 | Version availability / selection / resolved versioned PMCID | [references/cli-versions.md](references/cli-versions.md) (`versions`) |

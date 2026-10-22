@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from pmc_toolkit.xml_parse_utils import extract_article_data, extract_headings, load_xml
+from pmc_toolkit.xml_parse_utils import (
+    extract_article_data,
+    extract_headings,
+    extract_references,
+    load_xml,
+)
 
 SAMPLE_XML = """\
 <article article-type="research-article" xml:lang="en" xmlns:xlink="http://www.w3.org/1999/xlink">
@@ -282,3 +287,140 @@ def test_extract_content_omits_empty_top_level_paragraphs(tmp_path: Path) -> Non
 
     assert "paragraphs" not in data["content"]
     assert data["content"]["sections"][0]["paragraphs"][0]["source_id"] == "P1"
+
+
+def _references(tmp_path: Path, ref_list: str) -> list[dict]:
+    path = tmp_path / "article.xml"
+    path.write_text(
+        '<article xmlns:xlink="http://www.w3.org/1999/xlink"><back>'
+        f"<ref-list>{ref_list}</ref-list></back></article>",
+        encoding="utf-8",
+    )
+    return extract_references(load_xml(path))
+
+
+def test_extract_references_merges_citation_alternatives(tmp_path: Path) -> None:
+    references = _references(
+        tmp_path,
+        """
+        <ref id="CR6"><label>6.</label><citation-alternatives>
+          <element-citation id="ec-CR6" publication-type="journal">
+            <person-group person-group-type="author">
+              <name name-style="western"><surname>Strauss</surname><given-names>P</given-names></name>
+              <name name-style="western"><surname>Lin</surname><given-names>A</given-names></name>
+            </person-group>
+            <article-title>Associations between negative life experiences</article-title>
+            <source>Psychol Med</source><year>2020</year><volume>50</volume>
+            <issue>5</issue><fpage>808</fpage><lpage>817</lpage>
+            <pub-id pub-id-type="doi">10.1017/S0033291719000643</pub-id>
+          </element-citation>
+          <mixed-citation id="mc-CR6" publication-type="journal">Strauss P, Lin A (2020)
+            Associations between negative life experiences. Psychol Med 50(5):808-817
+            <pub-id pub-id-type="pmid">31280740</pub-id></mixed-citation>
+        </citation-alternatives></ref>
+        """,
+    )
+
+    assert len(references) == 1
+    reference = references[0]
+    assert reference["source_id"] == "CR6"
+    assert reference["text"].startswith("Strauss P, Lin A (2020)")
+    assert reference["identifiers"] == {
+        "doi": "10.1017/S0033291719000643",
+        "pmid": "31280740",
+    }
+    assert reference["authors"] == [
+        {"given_names": "P", "surname": "Strauss", "full_name": "P Strauss"},
+        {"given_names": "A", "surname": "Lin", "full_name": "A Lin"},
+    ]
+    assert "authors_truncated" not in reference
+    assert (
+        reference["article_title"] == "Associations between negative life experiences"
+    )
+    assert reference["source"] == "Psychol Med"
+    assert reference["year"] == "2020"
+    assert reference["pages"] == "808-817"
+
+
+def test_extract_references_reads_mixed_citation_authors(tmp_path: Path) -> None:
+    references = _references(
+        tmp_path,
+        """
+        <ref id="b31"><mixed-citation publication-type="book">
+          <string-name><surname>Kline</surname>, <given-names>R. B.</given-names></string-name>
+          (<year>2015</year>). <source>Principles and practice of structural equation
+          modeling</source>. <publisher-name>Guilford publications</publisher-name>.
+        </mixed-citation></ref>
+        <ref id="b32"><mixed-citation publication-type="journal">
+          <string-name>Smith J</string-name>, <collab>WHO Study Group</collab>, et al.
+          <article-title>Results of the trial</article-title>.
+          <pub-id pub-id-type="medline">12345</pub-id>
+        </mixed-citation></ref>
+        """,
+    )
+
+    kline, smith = references
+    assert kline["authors"] == [
+        {"given_names": "R. B.", "surname": "Kline", "full_name": "R. B. Kline"}
+    ]
+    assert kline["publisher"] == "Guilford publications"
+    assert kline["year"] == "2015"
+    assert smith["authors"] == [
+        {"full_name": "Smith J"},
+        {"full_name": "WHO Study Group", "collaboration": "WHO Study Group"},
+    ]
+    assert smith["authors_truncated"] is True
+    assert smith["identifiers"] == {"pmid": "12345"}
+
+
+def test_extract_references_detects_truncation_and_skips_editors(
+    tmp_path: Path,
+) -> None:
+    references = _references(
+        tmp_path,
+        """
+        <ref id="R1"><element-citation publication-type="journal">
+          <person-group person-group-type="author">
+            <name><surname>Radford</surname><given-names>A</given-names></name>
+            <etal/>
+          </person-group>
+          <article-title>Learning transferable visual models</article-title>
+        </element-citation></ref>
+        <ref id="R2"><element-citation publication-type="book">
+          <person-group person-group-type="author">
+            <name><surname>Doe</surname><given-names>J</given-names></name>
+          </person-group>
+          <person-group person-group-type="editor">
+            <name><surname>Editor</surname><given-names>E</given-names></name>
+            <etal/>
+          </person-group>
+          <chapter-title>A review of Smith et al. results</chapter-title>
+          <source>Handbook</source>
+        </element-citation></ref>
+        """,
+    )
+
+    radford, doe = references
+    assert radford["authors_truncated"] is True
+    assert [author["surname"] for author in doe["authors"]] == ["Doe"]
+    assert "authors_truncated" not in doe
+    assert doe["chapter_title"] == "A review of Smith et al. results"
+
+
+def test_extract_references_splits_refs_citing_several_works(tmp_path: Path) -> None:
+    references = _references(
+        tmp_path,
+        """
+        <ref id="R7"><label>7</label>
+          <mixed-citation publication-type="journal"><article-title>First</article-title></mixed-citation>
+          <mixed-citation publication-type="journal"><article-title>Second</article-title></mixed-citation>
+        </ref>
+        """,
+    )
+
+    assert [
+        (ref["source_id"], ref["label"], ref["article_title"]) for ref in references
+    ] == [
+        ("R7", "7", "First"),
+        ("R7", "7", "Second"),
+    ]
